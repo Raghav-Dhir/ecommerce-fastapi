@@ -12,6 +12,7 @@ from emails import *
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 import secrets
+from datetime import datetime
 
 app = FastAPI()
 
@@ -39,13 +40,16 @@ async def get_current_user(token: str = Depends(oauth2_schema)):
 @app.post('/user/me')
 async def user_login(user: user_pydanticIn = Depends(get_current_user)):
     business = await Business.get(owner=user)
+    logo = business.logo
+    logo_path = "localhost:8000/static/images/" + logo
     return {
         "status" : "ok",
         "data" : {
             "username" : user.username,
             "email" : user.email,
             "verified" : user.is_verified,
-            "join_date" : user.join_date.strftime("%b %d %Y")
+            "join_date" : user.join_date.strftime("%b %d %Y"),
+            "logo": logo_path
         }
     }
 
@@ -101,7 +105,7 @@ async def email_verification(request: Request, token: str):
 
 @app.post("/uploadfile/profile")
 async def create_upload_file(file: UploadFile = File(...), user: user_pydantic = Depends(get_current_user)):
-    FILEPATH = "./static/images"
+    FILEPATH = "./static/images/"
     filename = file.filename
     extension = filename.split(".")[1]
     if extension not in ["png", "jpg"]:
@@ -139,7 +143,7 @@ async def create_upload_file(file: UploadFile = File(...), user: user_pydantic =
 
 @app.post("/uploadfile/product/{id}")
 async def create_upload_file(id: int, file: UploadFile = File(...), user: user_pydantic = Depends(get_current_user)):
-    FILEPATH = "./static/images"
+    FILEPATH = "./static/images/"
     filename = file.filename
     extension = filename.split(".")[1]
     if extension not in ["png", "jpg"]:
@@ -175,6 +179,116 @@ async def create_upload_file(id: int, file: UploadFile = File(...), user: user_p
         "status" : "ok",
         "file name": {file_url}
     }
+
+@app.post("/products")
+async def add_new_product(product: product_pydanticIn, user: user_pydantic = Depends(get_current_user)):
+    product = product.dict(exclude_unset=True)
+    if product["original_price"] > 0:
+        product ["percentage_discount"] = ((product["original_price"] - product["new_price"]) / product["original_price"]) * 100
+
+        product_obj = await Product.create(**product, business = user)
+        product_obj = await product_pydantic.from_tortoise_orm(product_obj)
+
+        return {
+            "status" : "ok",
+            "data" : product_obj
+        }
+    else:
+        return{
+            "status" : "error"
+        }
+
+@app.get("/products")
+async def get_products():
+    response = await product_pydantic.from_queryset(Product.all())
+    return {
+        "status" : "ok",
+        "data" : response
+    }
+
+@app.get("/products/{id}")
+async def get_product(id: int):
+    product = await Product.get(id=id)
+    business = await product.business
+    owner = await business.owner
+    response = await product_pydantic.from_queryset_single(Product.get(id=id))
+    return {
+        "status" : "ok",
+        "data" : {
+            "product_details" : response,
+            "business_details" : {
+                "name" : business.business_name,
+                "city" : business.city,
+                "region" : business.region,
+                "description" : business.business_description,
+                "logo" : business.logo,
+                "owner" : owner.id,
+                "email" : owner.email,
+                "join_date" : owner.join_date.strftime("%b %d %Y")
+            }
+        }
+    }
+
+@app.delete("/products/{id}")
+async def delete_product(id: int, user: user_pydantic = Depends(get_current_user)):
+    product = await Product.get(id=id)
+    business = await product.business
+    owner = await business.owner
+    if user == owner:
+        await product.delete()
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated to perform this operation",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+    return {
+        "status" :"ok"
+    }
+
+@app.put("/products/{id}")
+async def update_product(id: int, update_info: product_pydanticIn, user: user_pydantic = Depends(get_current_user)):
+    product = await Product.get(id=id)
+    business = await product.business
+    owner = await business.owner
+    update_info = update_info.dict(exclude_unset=True)
+    update_info["date_published"] = datetime.utcnow()
+
+    if user == owner and update_info["original_price"] > 0:
+        update_info["percentage_discount"] = ((update_info["original_price"] - update_info["new_price"]) / update_info["original_price"]) * 100
+        product = await product.update_from_dict(update_info)
+        await product.save()
+        response = await product_pydantic.from_tortoise_orm(product)
+        return {
+            "status" : "ok",
+            "data" : response
+        }
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated to perform this operation or invalid user input",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
+@app.put("/business/{id}")
+async def update_business(id: int, update_info: business_pydanticIn, user: user_pydantic = Depends(get_current_user)):
+    update_info = update_info.dict()
+    business = await Business.get(id=id)
+    business_owner = await business.owner
+    if business_owner == user :
+        await business.update_from_dict(update_info)
+        await business.save()
+        response = await business_pydantic.from_tortoise_orm(business)
+        return {
+            "status" : "ok",
+            "data" : response
+        }
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated to perform this operation",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
 
 register_tortoise(
     app, 
